@@ -2,23 +2,20 @@ import streamlit as st
 import cv2
 import numpy as np
 import pandas as pd
-from streamlit_webrtc import webrtc_streamer, RTCConfiguration, WebRtcMode, VideoProcessorBase
+from streamlit_webrtc import webrtc_streamer, RTCConfiguration, WebRtcMode
 import av
 import os
 import time
 from datetime import datetime
-import threading
+import queue
 
-# --- 1. KONFIGURASI AWAL ---
+# --- 1. KONFIGURASI AWAL (MINIMALIS) ---
 st.set_page_config(page_title="Yarn Master System", layout="wide")
 
 DATABASE_FILE = "database_yarn.csv"
 HISTORY_FILE = "riwayat_deteksi.csv"
-SNAPSHOT_FOLDER = "snapshots"
-
-# KONFIGURASI DETEKSI
-ROI_SIZE = 50 
-THRESHOLD = 25.0  # batasan
+SNAPSHOT_FOLDER = "snapshots" 
+ROI_SIZE = 80
 
 # Buat folder snapshot jika belum ada
 if not os.path.exists(SNAPSHOT_FOLDER):
@@ -33,7 +30,11 @@ if not os.path.exists(HISTORY_FILE):
     with open(HISTORY_FILE, 'w') as f:
         f.write("Waktu,Kode_Warna,Jarak_DeltaE,L,a,b,Mode_Input,File_Gambar\n")
 
-# --- 2. FUNGSI LOGIKA ---
+# Queue untuk komunikasi data
+if "detection_queue" not in st.session_state:
+    st.session_state.detection_queue = queue.Queue()
+
+# --- 2. FUNGSI LOGIKA (BACKEND) ---
 
 @st.cache_data
 def load_database(csv_path):
@@ -79,7 +80,6 @@ def lab_to_bgr_preview(l, a, b):
     l_scaled = np.clip(l * 2.55, 0, 255)
     a_scaled = np.clip(a + 128, 0, 255)
     b_scaled = np.clip(b + 128, 0, 255)
-    
     pixel_lab = np.uint8([[[l_scaled, a_scaled, b_scaled]]]) 
     pixel_bgr = cv2.cvtColor(pixel_lab, cv2.COLOR_Lab2BGR)[0][0]
     return int(pixel_bgr[2]), int(pixel_bgr[1]), int(pixel_bgr[0])
@@ -89,8 +89,7 @@ def extract_color_roi(image_bgr):
     cx, cy = w // 2, h // 2
     x1, y1, x2, y2 = cx - ROI_SIZE, cy - ROI_SIZE, cx + ROI_SIZE, cy + ROI_SIZE
     
-    if x1 < 0 or y1 < 0 or x2 > w or y2 > h: 
-        return None, None, None
+    if x1 < 0 or y1 < 0 or x2 > w or y2 > h: return None, None, None
 
     roi = image_bgr[y1:y2, x1:x2]
     avg_bgr = np.mean(roi, axis=(0, 1))
@@ -101,109 +100,51 @@ def extract_color_roi(image_bgr):
     L, a, b = int(pixel_lab[0]), int(pixel_lab[1]), int(pixel_lab[2])
     return (L, a, b), avg_bgr, (x1, y1, x2, y2)
 
-# --- FUNGSI PENCARIAN  TOP 3 ---
-def find_top_matches(detected_lab, db_df, top_n=3):
-    """Mencari Top-N match terdekat berdasarkan Delta E"""
-    if db_df.empty: 
-        return []
-    
-    # Hitung Delta E ke semua data
+def find_closest(detected_lab, db_df):
+    if db_df.empty: return None, 0
     l_diff = db_df['L'] - detected_lab[0]
     a_diff = db_df['a'] - detected_lab[1]
     b_diff = db_df['b'] - detected_lab[2]
     distances = np.sqrt(l_diff**2 + a_diff**2 + b_diff**2)
-    
-    # Ambil index dari jarak terkecil ke terbesar
-    sorted_indices = distances.nsmallest(top_n).index
-    
-    results = []
-    for idx in sorted_indices:
-        dist = distances[idx]
-        # Hanya masukkan jika masuk dalam THRESHOLD
-        if dist <= THRESHOLD:
-            row_data = db_df.loc[idx]
-            results.append({
-                "kode": str(row_data['Kode_Warna']),
-                "dist": dist,
-                "data": row_data
-            })
-            
-    return results
+    min_idx = distances.idxmin()
+    return db_df.loc[min_idx], distances[min_idx]
 
-# Cache database di memori
-_cached_db = None
-_cached_db_time = 0
-
-def get_cached_database():
-    global _cached_db, _cached_db_time
-    current_time = time.time()
-    if _cached_db is None or (current_time - _cached_db_time) > 1:
+# --- 3. CALLBACK WEBRTC ---
+def video_frame_callback(frame):
+    img = frame.to_ndarray(format="bgr24")
+    img = cv2.resize(img, (640, 480))
+    
+    lab_vals, _, coords = extract_color_roi(img)
+    
+    if lab_vals:
+        x1, y1, x2, y2 = coords
+        cv2.rectangle(img, (x1, y1), (x2, y2), (0, 255, 0), 1)
+        
         try:
-            _cached_db = pd.read_csv(DATABASE_FILE)
-        except:
-            _cached_db = pd.DataFrame()
-    return _cached_db
-
-# --- 3. VIDEO PROCESSOR CLASS UPDATE TOP 3 ---
-class YarnDetectionProcessor(VideoProcessorBase):
-    def __init__(self):
-        self.lock = threading.Lock()
-        self.latest_detection = None
-        
-    def recv(self, frame):
-        img = frame.to_ndarray(format="bgr24")
-        img = cv2.resize(img, (640, 480))
-        
-        lab_vals, _, coords = extract_color_roi(img)
-        
-        if lab_vals:
-            x1, y1, x2, y2 = coords
-            # Gambar Kotak ROI Hijau
-            cv2.rectangle(img, (x1, y1), (x2, y2), (0, 255, 0), 2)
+            db_df = pd.read_csv(DATABASE_FILE)
+            best_match, dist = find_closest(lab_vals, db_df)
             
-            try:
-                db_df = get_cached_database()
-                # Panggil fungsi Top 3
-                matches = find_top_matches(lab_vals, db_df, top_n=3)
+            if best_match is not None:
+                kode = str(best_match['Kode_Warna'])
+                text = f"{kode} ({dist:.1f})"
+                cv2.rectangle(img, (x1, y1 - 25), (x1 + 200, y1), (0, 0, 0), -1)
+                cv2.putText(img, text, (x1+5, y1-8), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
                 
-                if matches:
-                    # Ambil Match Terbaik (Index 0)
-                    best = matches[0]
-                    kode_utama = best['kode']
-                    dist_utama = best['dist']
-                    
-                    # TAMPILAN UTAMA (Background Hitam + Teks Hijau)
-                    text_main = f"{kode_utama} ({dist_utama:.1f})"
-                    cv2.rectangle(img, (x1, y1 - 35), (x1 + 200, y1), (0, 0, 0), -1)
-                    cv2.putText(img, text_main, (x1+5, y1-10), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 0), 2)
-                    
-                    # TAMPILAN ALTERNATIF (Jika ada match ke-2)
-                    if len(matches) > 1:
-                        # Tampilkan di bawah kotak
-                        y_offset = y2 + 20
-                        for i in range(1, len(matches)):
-                            alt = matches[i]
-                            # Hanya tampilkan jika jaraknya beda tipis (misal selisih < 10) atau memang dekat
-                            text_alt = f"Alt: {alt['kode']} ({alt['dist']:.1f})"
-                            cv2.putText(img, text_alt, (x1, y_offset), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 255), 1)
-                            y_offset += 20
-                    
-                    # Update detection data
-                    with self.lock:
-                        self.latest_detection = {
-                            "matches": matches, # Simpan semua list match
+                if not st.session_state.detection_queue.full():
+                    try:
+                        while not st.session_state.detection_queue.empty():
+                            st.session_state.detection_queue.get_nowait()
+                        st.session_state.detection_queue.put({
+                            "kode": kode,
+                            "dist": dist,
                             "lab": lab_vals,
-                            "image": img.copy(),
-                            "timestamp": time.time()
-                        }
-            except Exception as e:
-                pass
-                
-        return av.VideoFrame.from_ndarray(img, format="bgr24")
-    
-    def get_latest_detection(self):
-        with self.lock:
-            return self.latest_detection
+                            "image": img 
+                        })
+                    except: pass
+        except: pass
+            
+    return av.VideoFrame.from_ndarray(img, format="bgr24")
+
 
 # --- 4. TAMPILAN ANTARMUKA ---
 
@@ -216,114 +157,65 @@ menu = st.sidebar.radio("Pilih Halaman", [
     "Database Manager"
 ])
 st.sidebar.markdown("---")
-st.sidebar.info(f"**Info Sistem**\n\nThreshold: {THRESHOLD}\nROI Size: {ROI_SIZE}")
 
 # ====================================================
-# HALAMAN 1: DETEKSI REALTIME (CLASS-BASED)
+# HALAMAN 1: DETEKSI REALTIME
 # ====================================================
 if menu == "Deteksi Realtime":
     st.title("Deteksi Realtime")
-    st.write("Arahkan kamera ke objek. Sistem akan menampilkan kode utama dan alternatif jika ada.")
-    
-    # Initialize processor in session state
-    if "video_processor" not in st.session_state:
-        st.session_state.video_processor = None
+    st.write("Arahkan kamera ke objek. Klik simpan untuk merekam data.")
     
     col_cam, col_ctrl = st.columns([2, 1])
     
     with col_cam:
         rtc_cfg = RTCConfiguration({"iceServers": [{"urls": ["stun:stun.l.google.com:19302"]}]})
-        webrtc_ctx = webrtc_streamer(
-            key="realtime-yarn-detection",
+        webrtc_streamer(
+            key="realtime-view",
             mode=WebRtcMode.SENDRECV,
             rtc_configuration=rtc_cfg,
-            video_processor_factory=YarnDetectionProcessor,
+            video_frame_callback=video_frame_callback,
             media_stream_constraints={"video": True, "audio": False},
             async_processing=True
         )
-        
-        if webrtc_ctx.video_processor:
-            st.session_state.video_processor = webrtc_ctx.video_processor
 
     with col_ctrl:
-        st.subheader("Hasil Deteksi")
-        
-        info_placeholder = st.empty()
-        
-        # Get detection data
-        current_data = None
-        if st.session_state.video_processor:
-            current_data = st.session_state.video_processor.get_latest_detection()
-        
-        # Display Info
-        if current_data and (time.time() - current_data['timestamp'] < 2):
-            matches = current_data['matches']
-            lab = current_data['lab']
-            
-            # Tampilkan Match Utama
-            best = matches[0]
-            st.success(f"### 🎯 Utama: {best['kode']}")
-            st.write(f"Delta E: **{best['dist']:.2f}**")
-            st.caption(f"Lab Input: {lab}")
-            
-            # Tampilkan Alternatif (Jika ada)
-            if len(matches) > 1:
-                st.markdown("---")
-                st.write("**Kandidat Lain:**")
-                for i in range(1, len(matches)):
-                    alt = matches[i]
-                    st.warning(f"🔹 **{alt['kode']}** (Diff: {alt['dist']:.2f})")
-            
-        else:
-            info_placeholder.info("Menunggu objek...")
-        
-        st.markdown("---")
-        
-        # Tombol Simpan
+        st.subheader("Kontrol")
         if st.button("Simpan Data & Gambar", type="primary", use_container_width=True):
-            if current_data and (time.time() - current_data['timestamp'] < 2):
+            if not st.session_state.detection_queue.empty():
                 try:
-                    # Ambil data terbaik (Index 0)
-                    best = current_data['matches'][0]
-                    kode = best['kode']
-                    dist = best['dist']
-                    lab = current_data['lab']
-                    img_capture = current_data['image']
+                    data_packet = st.session_state.detection_queue.get()
+                    kode = data_packet['kode']
+                    dist = data_packet['dist']
+                    lab = data_packet['lab']
+                    img_capture = data_packet['image']
                     
-                    with st.spinner("Menyimpan data..."):
-                        filename_img = save_snapshot(img_capture, kode)
-                        save_to_history(kode, dist, lab, "Realtime", filename_img)
-                        time.sleep(0.3)
+                    filename_img = save_snapshot(img_capture, kode)
+                    save_to_history(kode, dist, lab, "Realtime", filename_img)
                     
-                    st.success(f"✅ **Tersimpan: {kode}**")
-                    time.sleep(1.5)
-                    st.rerun()
-                    
+                    st.success(f"Tersimpan: {kode}")
+                    st.caption(f"File: {filename_img}")
                 except Exception as e:
-                    st.error(f"❌ Gagal menyimpan: {e}")
+                    st.error(f"Gagal: {e}")
             else:
-                st.error("⚠️ Tidak ada objek terdeteksi untuk disimpan.")
+                st.warning("Belum ada objek terdeteksi.")
 
-        # Riwayat Mini
-        with st.expander("Riwayat Terakhir"):
-            if os.path.exists(HISTORY_FILE):
-                try:
-                    df_hist = pd.read_csv(HISTORY_FILE)
-                    if not df_hist.empty:
-                        st.dataframe(df_hist[['Waktu', 'Kode_Warna', 'Jarak_DeltaE']].tail(5), hide_index=True)
-                except: pass
+        st.markdown("---")
+        st.write("Riwayat Terakhir:")
+        if os.path.exists(HISTORY_FILE):
+            try:
+                df_hist = pd.read_csv(HISTORY_FILE)
+                st.dataframe(df_hist[['Waktu', 'Kode_Warna', 'Jarak_DeltaE']].tail(5), hide_index=True)
+            except: pass
 
 # ====================================================
 # HALAMAN 2: DETEKSI UPLOAD
 # ====================================================
 elif menu == "Deteksi Upload":
     st.title("Deteksi Upload")
-    
     uploaded_file = st.file_uploader("Upload gambar (JPG/PNG)", type=["jpg", "jpeg", "png"])
     
     if uploaded_file:
         col_img, col_res = st.columns(2)
-        
         file_bytes = np.asarray(bytearray(uploaded_file.read()), dtype=np.uint8)
         img = cv2.imdecode(file_bytes, 1)
         lab_res, _, coords = extract_color_roi(img)
@@ -331,39 +223,22 @@ elif menu == "Deteksi Upload":
         with col_img:
             if coords:
                 cv2.rectangle(img, (coords[0], coords[1]), (coords[2], coords[3]), (0, 255, 0), 2)
-            st.image(img, channels="BGR", use_container_width=True)
+            st.image(img, channels="BGR", use_column_width=True)
             
         with col_res:
             if lab_res:
-                st.info(f"🔍 Terbaca Lab: {lab_res}")
-                
-                # Gunakan fungsi Top Matches
-                matches = find_top_matches(lab_res, yarn_db, top_n=3)
-                
-                if matches:
-                    # Tampilkan Terbaik
-                    best = matches[0]
-                    st.subheader(f"✅ Hasil Terbaik: {best['kode']}")
-                    st.metric("Jarak (Delta E)", f"{best['dist']:.2f}")
+                match_row, dist = find_closest(lab_res, yarn_db)
+                if match_row is not None:
+                    st.subheader(f"Hasil: {match_row['Kode_Warna']}")
+                    st.write(f"Delta E: {dist:.2f}")
+                    st.code(f"L:{lab_res[0]} a:{lab_res[1]} b:{lab_res[2]}")
                     
-                    # Tampilkan Alternatif
-                    if len(matches) > 1:
-                        st.markdown("---")
-                        st.write("📋 **Kemungkinan Lain:**")
-                        for i in range(1, len(matches)):
-                            alt = matches[i]
-                            st.write(f"- **{alt['kode']}** (Jarak: {alt['dist']:.2f})")
-                    
-                    st.markdown("---")
-                    if st.button("Simpan Hasil Terbaik"):
-                        filename_img = save_snapshot(img, best['kode'])
-                        save_to_history(best['kode'], best['dist'], lab_res, "Upload", filename_img)
-                        st.success("✅ Data tersimpan.")
-                        time.sleep(1)
-                        st.rerun()
+                    if st.button("Simpan Hasil"):
+                        filename_img = save_snapshot(img, match_row['Kode_Warna'])
+                        save_to_history(match_row['Kode_Warna'], dist, lab_res, "Upload", filename_img)
+                        st.success("Data tersimpan.")
                 else:
-                    st.error(f"⚠️ Tidak ada kecocokan (Semua di atas Threshold {THRESHOLD}).")
-                    st.write("Coba pastikan pencahayaan cukup terang.")
+                    st.warning("Tidak cocok.")
 
 # ====================================================
 # HALAMAN 3: DATABASE MANAGER
@@ -371,7 +246,7 @@ elif menu == "Deteksi Upload":
 elif menu == "Database Manager":
     st.title("Database Manager")
     
-    tab1, tab2 = st.tabs(["📋 Lihat Data", "➕ Tambah Data"])
+    tab1, tab2 = st.tabs(["Lihat Data", "Tambah Data"])
     
     with tab1:
         if not yarn_db.empty:
@@ -380,10 +255,52 @@ elif menu == "Database Manager":
             st.info("Database kosong.")
 
     with tab2:
-        st.write("Tambah Referensi Warna")
-        input_type = st.radio("Metode Input", ["Upload Gambar", "Manual Angka"])
+        st.write("### Tambah Data Master Baru")
+        # Menambahkan Opsi "Ambil Foto (Kamera)" di sini
+        input_type = st.radio("Metode Input", ["Ambil Foto (Kamera)", "Upload File", "Manual Angka"], horizontal=True)
         
-        if input_type == "Upload Gambar":
+        # --- MODE 1: KAMERA REALTIME (BARU) ---
+        if input_type == "Ambil Foto (Kamera)":
+            col_cam_in, col_cam_res = st.columns(2)
+            
+            with col_cam_in:
+                new_code_cam = st.text_input("1. Masukkan Kode Warna Baru (Wajib)", key="code_cam")
+                st.write("2. Arahkan benang ke tengah kamera & klik 'Take Photo'")
+                # Widget Kamera Native Streamlit
+                camera_file = st.camera_input("Kamera Input", label_visibility="collapsed")
+
+            with col_cam_res:
+                if camera_file is not None and new_code_cam:
+                    # Proses gambar dari kamera
+                    bytes_data = camera_file.getvalue()
+                    img_cam = cv2.imdecode(np.frombuffer(bytes_data, np.uint8), cv2.IMREAD_COLOR)
+                    
+                    # Ekstrak Warna
+                    lab_vals, rgb_avg, coords = extract_color_roi(img_cam)
+                    
+                    if lab_vals:
+                        # Gambar kotak ROI di hasil foto
+                        preview = img_cam.copy()
+                        cv2.rectangle(preview, (coords[0], coords[1]), (coords[2], coords[3]), (0,255,0), 2)
+                        
+                        st.image(preview, channels="BGR", caption="Hasil Capture", width=250)
+                        st.info(f"Terdeteksi LAB: {lab_vals}")
+                        
+                        if st.button("Simpan ke Database", type="primary"):
+                            R, G, B = int(rgb_avg[2]), int(rgb_avg[1]), int(rgb_avg[0])
+                            succ, msg = save_new_master_data(new_code_cam, lab_vals[0], lab_vals[1], lab_vals[2], R, G, B)
+                            if succ:
+                                st.success(f"Kode {new_code_cam} berhasil disimpan!")
+                                time.sleep(1.5)
+                                st.cache_data.clear()
+                                st.rerun()
+                            else:
+                                st.error(msg)
+                elif camera_file is not None and not new_code_cam:
+                    st.warning("Mohon isi Kode Warna terlebih dahulu di sebelah kiri.")
+
+        # --- MODE 2: UPLOAD FILE (LAMA) ---
+        elif input_type == "Upload File":
             col_in, col_prev = st.columns(2)
             with col_in:
                 new_code = st.text_input("Kode Warna")
@@ -405,13 +322,14 @@ elif menu == "Database Manager":
                             R, G, B = int(rgb_avg[2]), int(rgb_avg[1]), int(rgb_avg[0])
                             succ, msg = save_new_master_data(new_code, lab_vals[0], lab_vals[1], lab_vals[2], R, G, B)
                             if succ:
-                                st.success("✅ Tersimpan.")
+                                st.success("Tersimpan.")
                                 time.sleep(1)
                                 st.cache_data.clear()
                                 st.rerun()
                             else:
                                 st.error(msg)
-        
+
+        # --- MODE 3: MANUAL ANGKA (LAMA) ---
         elif input_type == "Manual Angka":
             c1, c2, c3, c4 = st.columns(4)
             with c1: code_m = st.text_input("Kode")
@@ -424,11 +342,11 @@ elif menu == "Database Manager":
                     pr_R, pr_G, pr_B = lab_to_bgr_preview(L_m, a_m, b_m)
                     succ, msg = save_new_master_data(code_m, L_m, a_m, b_m, pr_R, pr_G, pr_B)
                     if succ:
-                        st.success("✅ Tersimpan.")
+                        st.success("Tersimpan.")
                         time.sleep(1)
                         st.cache_data.clear()
                         st.rerun()
                     else:
                         st.error(msg)
                 else:
-                    st.error("❌ Kode harus diisi.")
+                    st.error("Kode harus diisi.")
