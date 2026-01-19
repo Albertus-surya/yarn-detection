@@ -13,7 +13,7 @@ st.set_page_config(page_title="Yarn Master System", layout="wide")
 DATABASE_FILE = "database_yarn.csv"
 HISTORY_FILE = "riwayat_deteksi.csv"
 SNAPSHOT_FOLDER = "snapshots"
-ROI_SIZE = 80
+ROI_SIZE = 140
 
 if not os.path.exists(SNAPSHOT_FOLDER):
     os.makedirs(SNAPSHOT_FOLDER)
@@ -274,13 +274,25 @@ def save_to_history(kode, distance, lab_values, source_mode, image_filename="-")
 
 def save_new_master_data(code, l, a, b, r, g, b_val):
     try:
+        # Cek apakah kode sudah ada, jika ya buat variasi dengan angka
         curr_db = pd.read_csv(DATABASE_FILE)
-        if code in curr_db['Kode_Warna'].values.astype(str):
-            return False, f"Kode '{code}' sudah ada."
+        existing_codes = curr_db['Kode_Warna'].values.astype(str).tolist()
+        
+        original_code = code
+        counter = 1
+        
+        # Jika kode sudah ada, tambahkan suffix (1), (2), dst
+        while code in existing_codes:
+            code = f"{original_code}({counter})"
+            counter += 1
         
         with open(DATABASE_FILE, mode='a', newline='\n') as f:
             f.write(f"{code},{l},{a},{b},{r},{g},{b_val}\n")
-        return True, "Berhasil disimpan."
+        
+        if code != original_code:
+            return True, f"Berhasil disimpan sebagai '{code}' (nama asli sudah ada)."
+        else:
+            return True, "Berhasil disimpan."
     except Exception as e:
         return False, str(e)
 
@@ -402,7 +414,7 @@ if menu == "Deteksi Realtime":
     st.title("Deteksi Realtime")
     st.write("Arahkan kamera ke objek.")
     
-    col_cam, col_ctrl = st.columns([2, 1])
+    col_cam, col_ctrl = st.columns([3, 1])
     
     with col_cam:
         rtc_cfg = RTCConfiguration({"iceServers": [{"urls": ["stun:stun.l.google.com:19302"]}]})
@@ -411,9 +423,15 @@ if menu == "Deteksi Realtime":
         ctx = webrtc_streamer(
             key="realtime-view",
             mode=WebRtcMode.SENDRECV,
-            rtc_configuration=rtc_cfg,
             video_processor_factory=YarnDetector,
-            media_stream_constraints={"video": True, "audio": False},
+            media_stream_constraints={
+                "video": {
+                    "width": {"ideal": 1280},
+                    "height": {"ideal": 720},
+                    "frameRate": {"ideal": 30}
+                },
+                "audio": False
+            },
             async_processing=True
         )
 
