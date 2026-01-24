@@ -4,36 +4,44 @@ import os
 import paho.mqtt.client as mqtt
 
 # --- KONFIGURASI ---
-FILE_TO_WATCH = "riwayat_deteksi.csv" 
+FILE_TO_WATCH = "scan_history.csv" 
 MQTT_BROKER = "test.mosquitto.org" 
 MQTT_PORT = 1883
 MQTT_TOPIC = "yarn-mqtt"
 
 def send_to_mqtt(client, data_row):
-    """Mengonversi baris CSV menjadi JSON dan mengirimnya"""
+    """Mengonversi baris CSV menjadi JSON dan mengirimnya ke MQTT"""
     try:
         parts = data_row.strip().split(',')
-        
-        # Sesuai urutan CSV: Waktu, Kode_Warna, Jarak_DeltaE, L, a, b, Mode_Input, File_Gambar
-        if len(parts) >= 7:
+
+        # Pastikan jumlah kolom sesuai
+        if len(parts) >= 9:
             payload = {
-                "waktu": parts[0],
-                "kode_warna": parts[1],
-                "delta_e": parts[2],
-                "lab": {
-                    "L": parts[3],
-                    "a": parts[4],
-                    "b": parts[5]
+                "timestamp": parts[0],
+                "label": parts[1],
+                "confidence": float(parts[2]),
+                "mean_lab": {
+                    "L": float(parts[3]),
+                    "a": float(parts[4]),
+                    "b": float(parts[5])
                 },
-                "mode": parts[6],
-                "file": parts[7] if len(parts) > 7 else "-"
+                "std_lab": {
+                    "L": float(parts[6]),
+                    "a": float(parts[7]),
+                    "b": float(parts[8])
+                }
             }
-            
-            # retain=True membuat broker menyimpan pesan terakhir untuk pelanggan baru
-            client.publish(MQTT_TOPIC, json.dumps(payload), retain=True)
-            print(f"[SENT] Data {parts[1]} sukses terkirim ke {MQTT_TOPIC}")
+
+            client.publish(
+                MQTT_TOPIC,
+                json.dumps(payload),
+                retain=True
+            )
+
+            print(f"[SENT] Label {parts[1]} | Confidence {parts[2]} terkirim")
+
     except Exception as e:
-        print(f"Error memproses baris: {e}")
+        print(f"[ERROR] Gagal memproses baris: {e}")
 
 def monitor_csv():
     # Inisialisasi Client

@@ -24,16 +24,16 @@ def train():
 
     X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
 
-    print("🌲 Training Random Forest dengan 6 Fitur (Mean + Texture)...")
+    print("Training Random Forest dengan 6 Fitur (Mean + Texture)...")
     rf = RandomForestClassifier(n_estimators=100, random_state=42)
     rf.fit(X_train, y_train)
 
     acc = accuracy_score(y_test, rf.predict(X_test))
-    print(f"🚀 Akurasi Model V2: {acc*100:.2f}%")
+    print(f"Akurasi Model V2: {acc*100:.2f}%")
     print(classification_report(y_test, rf.predict(X_test)))
 
     joblib.dump(rf, MODEL_FILE)
-    print(f"💾 Model disimpan ke: {MODEL_FILE}")
+    print(f"Model disimpan ke: {MODEL_FILE}")
 
 if __name__ == "__main__":
     train()

@@ -106,7 +106,7 @@ class DataCollectorProcessor(VideoProcessorBase):
         return av.VideoFrame.from_ndarray(img, format="bgr24")
 
 # UI SEDERHANA
-st.title("📸 Data Collector V2 (Fitur Tekstur)")
+st.title("Data Collector V2 (Fitur Tekstur)")
 st.caption("Menyimpan Mean + StdDev ke `yarn_dataset_extended.csv`")
 
 col_cam, col_ctrl = st.columns([2, 1])

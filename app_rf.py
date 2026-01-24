@@ -107,7 +107,7 @@ class YarnDetectorV2(VideoProcessorBase):
         return av.VideoFrame.from_ndarray(img, format="bgr24")
 
 # --- USER INTERFACE ---
-st.title("🌲 Yarn AI Logger")
+st.title("Yarn AI Logger")
 st.caption("Scan benang dan simpan langsung ke CSV untuk dataset/riwayat.")
 
 if rf_model:
@@ -130,7 +130,7 @@ if rf_model:
     # Tombol Simpan
     if ctx.video_processor:
         # Tombol dibuat besar agar mudah ditekan
-        if st.button("💾 SIMPAN KE CSV", type="primary", use_container_width=True):
+        if st.button("SIMPAN KE CSV", type="primary", use_container_width=True):
             data = ctx.video_processor.current_result
             
             if data:
@@ -156,12 +156,12 @@ if rf_model:
                     file_exists = os.path.isfile(CSV_FILE)
                     df_new.to_csv(CSV_FILE, mode='a', header=not file_exists, index=False)
                     
-                    st.success(f"✅ Data tersimpan: {data['label']} ({data['confidence']:.1%})")
+                    st.success(f"Data tersimpan: {data['label']} ({data['confidence']:.1%})")
                     print(f"Saved: {new_row}") # Log ke terminal juga
                 except Exception as e:
                     st.error(f"Gagal menyimpan: {e}")
             else:
-                st.warning("⚠️ Tidak ada objek terdeteksi atau confidence rendah. Pastikan kotak biru fokus ke benang.")
+                st.warning("Tidak ada objek terdeteksi atau confidence rendah. Pastikan kotak biru fokus ke benang.")
 
 else:
     st.error("Model 'rf_yarn_model_v2.pkl' tidak ditemukan di folder 'models'.")

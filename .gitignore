@@ -3,8 +3,5 @@ venv/
 __pycache__/
 *.pyc
 .env
-<<<<<<< HEAD
-=======
 data/snapshots/
 models/
->>>>>>> knn-detection
